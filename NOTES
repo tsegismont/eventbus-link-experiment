@@ -1,2 +1,3 @@
 - HA not supported
-- In Vert.x 3: link favors local cluster for send/request, if it has consumers
+- Publish not supported (cycles)
+- In Vert.x 3: link favors local cluster
