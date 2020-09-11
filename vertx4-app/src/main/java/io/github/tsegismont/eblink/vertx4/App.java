@@ -54,7 +54,7 @@ public class App extends AbstractVerticle {
       int size = -1;
 
       public void handle(Buffer buffer) {
-        if (size==-1) {
+        if (size == -1) {
           size = buffer.getInt(0);
           parser.fixedSizeMode(size);
         } else {
@@ -64,14 +64,14 @@ public class App extends AbstractVerticle {
           byte systemCodecCode = buffer.getByte(pos);
           pos++;
           MessageCodec codec;
-          if (systemCodecCode==-1) {
+          if (systemCodecCode == -1) {
             // User codec
             int length = buffer.getInt(pos);
             pos += 4;
             byte[] bytes = buffer.getBytes(pos, pos + length);
             String codecName = new String(bytes, CharsetUtil.UTF_8);
             codec = codecManager.getCodec(codecName);
-            if (codec==null) {
+            if (codec == null) {
               throw new IllegalStateException("No message codec registered with name " + codecName);
             }
             pos += length;
@@ -79,7 +79,7 @@ public class App extends AbstractVerticle {
             codec = codecManager.systemCodecs()[systemCodecCode];
           }
           byte bsend = buffer.getByte(pos);
-          boolean send = bsend==0;
+          boolean send = bsend == 0;
           pos++;
           int length = buffer.getInt(pos);
           pos += 4;
@@ -89,7 +89,7 @@ public class App extends AbstractVerticle {
           length = buffer.getInt(pos);
           pos += 4;
           String replyAddress;
-          if (length!=0) {
+          if (length != 0) {
             bytes = buffer.getBytes(pos, pos + length);
             replyAddress = new String(bytes, CharsetUtil.UTF_8);
             pos += length;
@@ -103,7 +103,7 @@ public class App extends AbstractVerticle {
           MultiMap headers;
           int headersPos = pos;
           int headersLength = buffer.getInt(pos);
-          if (headersLength!=4) {
+          if (headersLength != 4) {
             headersPos += 4;
             int numHeaders = buffer.getInt(headersPos);
             headersPos += 4;
@@ -130,22 +130,28 @@ public class App extends AbstractVerticle {
 
           parser.fixedSizeMode(4);
           size = -1;
-          if (codec==CodecManager.PING_MESSAGE_CODEC) {
+          if (codec == CodecManager.PING_MESSAGE_CODEC) {
             // Just send back pong directly on connection
             socket.write(PONG);
           } else {
-            DeliveryOptions options = new DeliveryOptions().setHeaders(headers);
-            if (codec.systemCodecID()==-1) {
-              options.setCodecName(codec.name());
+            if (headers == null) {
+              headers = MultiMap.caseInsensitiveMultiMap();
             }
-            if (send) {
-              if (replyAddress==null) {
-                vertx.eventBus().send(address, body, options);
-              } else {
-                // TODO
+            if (send || !headers.contains("__vertx.link.relayed")) {
+              headers.set("__vertx.link.relayed", "");
+              DeliveryOptions options = new DeliveryOptions().setHeaders(headers);
+              if (codec.systemCodecID() == -1) {
+                options.setCodecName(codec.name());
               }
-            } else {
-              // NOT FORWARDED (cycle possible)
+              if (send) {
+                if (replyAddress == null) {
+                  vertx.eventBus().send(address, body, options);
+                } else {
+                  // TODO
+                }
+              } else {
+                vertx.eventBus().publish(address, body, options);
+              }
             }
           }
         }
@@ -168,15 +174,15 @@ public class App extends AbstractVerticle {
   private void handleRequest(HttpServerRequest request) {
     MultiMap params = request.params();
     String address = params.get("address");
-    if (address==null) {
+    if (address == null) {
       address = "foo";
     }
     String method = params.get("method");
-    if (method==null) {
+    if (method == null) {
       method = "send";
     }
     BiConsumer<String, DeliveryOptions> handler = handlers.get(method);
-    if (handler!=null) {
+    if (handler != null) {
       DeliveryOptions options = new DeliveryOptions().addHeader("method", method);
       handler.accept(address, options);
       request.response().end();

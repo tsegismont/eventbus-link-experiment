@@ -18,7 +18,7 @@ public class AppLauncher extends io.vertx.core.Launcher {
 
   static {
     String addresses = System.getenv("VERTX_LINK_ADDRESSES");
-    if (addresses!=null) {
+    if (addresses != null) {
       ADDRESSES = Arrays.stream(addresses.split(",")).map(String::trim).filter(s -> !s.isEmpty()).collect(toSet());
     } else {
       ADDRESSES = Collections.emptySet();

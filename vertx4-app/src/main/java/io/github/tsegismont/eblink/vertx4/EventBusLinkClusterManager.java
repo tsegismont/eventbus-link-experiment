@@ -13,13 +13,14 @@ public class EventBusLinkClusterManager implements ClusterManager {
 
   private final ClusterManager delegate;
   private final Set<String> addresses;
+  private final NodeInfo fakeNode;
   private final RegistrationInfo fakeRegistration;
 
   public EventBusLinkClusterManager(ClusterManager delegate, Set<String> addresses, String host, int port) {
     this.delegate = Objects.requireNonNull(delegate);
     this.addresses = Objects.requireNonNull(addresses);
+    fakeNode = new NodeInfo(Objects.requireNonNull(host), port, null);
     fakeRegistration = new RegistrationInfo("__vertx.eventbus.link.fake.node", 0, false);
-    Objects.requireNonNull(host);
   }
 
   @Override
@@ -74,7 +75,11 @@ public class EventBusLinkClusterManager implements ClusterManager {
 
   @Override
   public void getNodeInfo(String s, Promise<NodeInfo> promise) {
-    delegate.getNodeInfo(s, promise);
+    if ("__vertx.eventbus.link.fake.node".equals(s)) {
+      promise.complete(fakeNode);
+    } else {
+      delegate.getNodeInfo(s, promise);
+    }
   }
 
   @Override
