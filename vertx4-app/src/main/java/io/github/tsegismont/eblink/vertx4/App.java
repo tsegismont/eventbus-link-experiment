@@ -2,14 +2,9 @@ package io.github.tsegismont.eblink.vertx4;
 
 import io.vertx.core.AbstractVerticle;
 import io.vertx.core.MultiMap;
-import io.vertx.core.buffer.Buffer;
 import io.vertx.core.eventbus.DeliveryOptions;
 import io.vertx.core.eventbus.EventBus;
-import io.vertx.core.eventbus.MessageCodec;
-import io.vertx.core.eventbus.impl.CodecManager;
 import io.vertx.core.http.HttpServerRequest;
-import io.vertx.core.http.ServerWebSocket;
-import io.vertx.core.json.JsonObject;
 
 import java.util.*;
 import java.util.function.BiConsumer;
@@ -54,34 +49,10 @@ public class App extends AbstractVerticle {
     vertx.createHttpServer()
         .requestHandler(this::handleRequest)
         .listen(PORT, HOST);
-
-    vertx.createHttpServer()
-        .webSocketHandler(this::handleWebsocketLink)
-        .listen(LINK_PORT, HOST);
   }
 
   private EventBus wrapEventBus() {
-    return new EventBusLink(vertx, ADDRESSES, LINK_HOST, LINK_PORT);
-  }
-
-  private void handleWebsocketLink(ServerWebSocket serverWebSocket) {
-    serverWebSocket.binaryMessageHandler(buffer -> {
-      JsonObject json = buffer.toJsonObject();
-      String method = json.getString("method");
-      String address = json.getString("address");
-      DeliveryOptions options = new DeliveryOptions(json.getJsonObject("options"));
-      String codec = json.getString("codec");
-      Buffer body = json.getBuffer("body");
-      MessageCodec messageCodec = Arrays.stream(new CodecManager().systemCodecs()).filter(mc -> mc.name().equals(codec)).findFirst().get();
-      Object msg = messageCodec.decodeFromWire(0, body);
-      if (method.equals("send")) {
-        vertx.eventBus().send(address, msg, options);
-      } else if (method.equals("request")) {
-        // FIXME
-      } else if (method.equals("publish")) {
-        vertx.eventBus().publish(address, msg, options);
-      }
-    });
+    return new EventBusLink(vertx, ADDRESSES, HOST, LINK_HOST, LINK_PORT);
   }
 
   private void consumer(String address) {

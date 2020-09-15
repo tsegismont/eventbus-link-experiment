@@ -1,3 +1,7 @@
-- HA not supported
+- HA not supported globally (but still handled at the cluster level)
 - Figure out how to handle multiple verticles/instances and thread safety
-- Handle codec name correctly
+- Fix codec name implementation
+- Fix failures implementation
+- Fix reply headers implementation
+- Implement replyAndRequest
+- Fix websocket server state management
