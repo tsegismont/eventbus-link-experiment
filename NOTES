@@ -5,3 +5,4 @@
 - Fix reply headers implementation
 - Implement replyAndRequest
 - Fix websocket server state management
+- Handle timeout correctly when replied not received (reply exception for sender)
