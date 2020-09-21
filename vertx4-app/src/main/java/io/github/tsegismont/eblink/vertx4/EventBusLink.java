@@ -53,7 +53,7 @@ public class EventBusLink implements EventBus {
       if (method.equals("send")) {
         vertx.eventBus().send(address, msg, options);
       } else if (method.equals("request")) {
-        String replyId = json.getString("replyId");
+        String replyId = json.getString("replyTo");
         vertx.eventBus().request(address, msg, options, ar -> {
           JsonObject reply;
           if (ar.succeeded()) {
@@ -127,7 +127,7 @@ public class EventBusLink implements EventBus {
         .put("codec", codec.name())
         .put("body", buffer.getBytes());
     if (replyId != null) {
-      json.put("replyId", replyId);
+      json.put("replyTo", replyId);
     }
     return json;
   }
