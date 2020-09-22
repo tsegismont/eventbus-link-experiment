@@ -1,9 +1,11 @@
 package io.github.tsegismont.eblink.vertx4;
 
 import io.vertx.core.AbstractVerticle;
+import io.vertx.core.AsyncResult;
 import io.vertx.core.MultiMap;
 import io.vertx.core.eventbus.DeliveryOptions;
 import io.vertx.core.eventbus.EventBus;
+import io.vertx.core.eventbus.Message;
 import io.vertx.core.http.HttpServerRequest;
 
 import java.util.*;
@@ -37,6 +39,7 @@ public class App extends AbstractVerticle {
     handlers.put("send", this::send);
     handlers.put("request", this::request);
     handlers.put("publish", this::publish);
+    handlers.put("pingPong", this::pingPong);
   }
 
   @Override
@@ -45,10 +48,29 @@ public class App extends AbstractVerticle {
 
     consumer("foo");
     consumer(HOST);
+    vertx.eventBus().consumer("pingPong", this::handlePing);
 
     vertx.createHttpServer()
         .requestHandler(this::handleRequest)
         .listen(PORT, HOST);
+  }
+
+  private void handlePing(Message<Integer> msg) {
+    int value = msg.body();
+    System.out.printf("%s received message on address %s%n%s%n", HOST, "pingPong", value);
+    if (value < 10) {
+      msg.<Integer>replyAndRequest(value, ar -> {
+        if (ar.succeeded()) {
+          handlePing(ar.result());
+        } else {
+          System.out.printf("%s received failure%n", HOST);
+          ar.cause().printStackTrace();
+        }
+      });
+    } else {
+      msg.reply(value);
+    }
+    System.out.printf("%s has replied%n", HOST);
   }
 
   private EventBus wrapEventBus() {
@@ -77,7 +99,7 @@ public class App extends AbstractVerticle {
     }
     BiConsumer<String, DeliveryOptions> handler = handlers.get(method);
     if (handler != null) {
-      DeliveryOptions options = new DeliveryOptions().addHeader("method", method);
+      DeliveryOptions options = new DeliveryOptions().setSendTimeout(Long.MAX_VALUE).addHeader("method", method);
       handler.accept(address, options);
       request.response().end();
     } else {
@@ -105,5 +127,26 @@ public class App extends AbstractVerticle {
   private void publish(String address, DeliveryOptions options) {
     eventBus.publish(address, "toto", options);
     System.out.printf("%s sent publish%n", HOST);
+  }
+
+  private void pingPong(String address, DeliveryOptions options) {
+    eventBus.request(address, 0, options, this::pongHandler);
+    System.out.printf("%s sent ping%n", HOST);
+  }
+
+  private void pongHandler(AsyncResult<Message<Integer>> ar) {
+    if (ar.succeeded()) {
+      Message<Integer> message = ar.result();
+      int value = message.body();
+      System.out.printf("%s received pong %d%n", HOST, value);
+      if (value < 10) {
+        message.replyAndRequest(value + 1, this::pongHandler);
+      } else {
+        message.reply(value + 1);
+      }
+    } else {
+      System.out.printf("%s received failure%n", HOST);
+      ar.cause().printStackTrace();
+    }
   }
 }

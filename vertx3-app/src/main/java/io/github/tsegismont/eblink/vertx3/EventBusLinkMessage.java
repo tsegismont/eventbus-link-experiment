@@ -5,13 +5,19 @@ import io.vertx.core.Handler;
 import io.vertx.core.MultiMap;
 import io.vertx.core.eventbus.DeliveryOptions;
 import io.vertx.core.eventbus.Message;
+import io.vertx.core.eventbus.ReplyException;
+import io.vertx.core.eventbus.ReplyFailure;
 
 public class EventBusLinkMessage<T> implements Message<T> {
 
+  private final EventBusLink eventBusLink;
+  private final String replyId;
   private final String address;
   private final T body;
 
-  public EventBusLinkMessage(String address, Object body) {
+  public EventBusLinkMessage(EventBusLink eventBusLink, String replyId, String address, Object body) {
+    this.eventBusLink = eventBusLink;
+    this.replyId = replyId;
     this.address = address;
     this.body = (T) body;
   }
@@ -43,31 +49,33 @@ public class EventBusLinkMessage<T> implements Message<T> {
 
   @Override
   public void reply(Object message) {
-    // FIXME
-    throw new UnsupportedOperationException();
+    reply(message, new DeliveryOptions());
   }
 
   @Override
   public <R> void reply(Object message, Handler<AsyncResult<Message<R>>> replyHandler) {
-    // FIXME
-    throw new UnsupportedOperationException();
+    reply(message, new DeliveryOptions(), replyHandler);
   }
 
   @Override
   public void reply(Object message, DeliveryOptions options) {
-    // FIXME
-    throw new UnsupportedOperationException();
+    if (replyId != null) {
+      eventBusLink.reply(address, replyId, message, options);
+    }
   }
 
   @Override
   public <R> void reply(Object message, DeliveryOptions options, Handler<AsyncResult<Message<R>>> replyHandler) {
-    // FIXME
-    throw new UnsupportedOperationException();
+    if (replyId == null) {
+      throw new IllegalStateException();
+    }
+    eventBusLink.requestAndReply(address, replyId, message, options, replyHandler);
   }
 
   @Override
   public void fail(int failureCode, String message) {
-    // FIXME
-    throw new UnsupportedOperationException();
+    if (replyId != null) {
+      eventBusLink.reply(address, replyId, new ReplyException(ReplyFailure.RECIPIENT_FAILURE, failureCode, message), null);
+    }
   }
 }

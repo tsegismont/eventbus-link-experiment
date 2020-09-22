@@ -6,3 +6,8 @@
 - Implement replyAndRequest
 - Fix websocket server state management
 - Handle timeout correctly when replied not received (reply exception for sender)
+- Handler all timeouts correctly
+- Fix invocation contexts (capture in Vert.x 3, use correct promise in Vert.x 4)
+- Test all codecs
+- Test all failure cases (timeout, explicit failure, runtime exception)
+- Make EventBusLink thread-safe

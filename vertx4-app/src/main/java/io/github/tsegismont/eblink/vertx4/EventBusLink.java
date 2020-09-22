@@ -5,10 +5,7 @@ import io.vertx.core.buffer.Buffer;
 import io.vertx.core.eventbus.*;
 import io.vertx.core.eventbus.impl.CodecManager;
 import io.vertx.core.eventbus.impl.MessageImpl;
-import io.vertx.core.http.HttpClient;
-import io.vertx.core.http.HttpClientOptions;
-import io.vertx.core.http.ServerWebSocket;
-import io.vertx.core.http.WebSocket;
+import io.vertx.core.http.*;
 import io.vertx.core.impl.ContextInternal;
 import io.vertx.core.json.JsonObject;
 
@@ -25,7 +22,7 @@ public class EventBusLink implements EventBus {
   private final Set<String> addresses;
   private final CodecManager codecManager;
   private final HttpClient httpClient;
-  private final ConcurrentMap<String, Handler<JsonObject>> replyHandlers;
+  private final ConcurrentMap<String, Object> replyContexts;
   private WebSocket webSocket;
 
   public EventBusLink(Vertx vertx, Set<String> addresses, String host, String linkHost, int linkPort) {
@@ -37,36 +34,88 @@ public class EventBusLink implements EventBus {
     vertx.createHttpServer()
         .webSocketHandler(this::handleWebsocketLink)
         .listen(linkPort, host);
-    replyHandlers = new ConcurrentHashMap<>();
+    replyContexts = new ConcurrentHashMap<>();
   }
 
   private void handleWebsocketLink(ServerWebSocket serverWebSocket) {
     serverWebSocket.binaryMessageHandler(buffer -> {
       JsonObject json = buffer.toJsonObject();
-      String method = json.getString("method");
       String address = json.getString("address");
+      Boolean send = json.getBoolean("send");
+      String replyId = json.getString("replyId");
+      String replyTo = json.getString("replyTo");
       DeliveryOptions options = new DeliveryOptions(json.getJsonObject("options"));
       String codec = json.getString("codec");
       Buffer body = Buffer.buffer(json.getBinary("body"));
-      MessageCodec messageCodec = Arrays.stream(new CodecManager().systemCodecs()).filter(mc -> mc.name().equals(codec)).findFirst().get();
-      Object msg = messageCodec.decodeFromWire(0, body);
-      if (method.equals("send")) {
-        vertx.eventBus().send(address, msg, options);
-      } else if (method.equals("request")) {
-        String replyId = json.getString("replyTo");
-        vertx.eventBus().request(address, msg, options, ar -> {
-          JsonObject reply;
-          if (ar.succeeded()) {
-            reply = createReplyPayload((MessageImpl) ar.result(), replyId);
-          } else {
-            reply = createReplyPayload((ReplyException) ar.cause(), replyId);
-          }
-          send(serverWebSocket, reply);
-        });
-      } else if (method.equals("publish")) {
+      Object msg = forDecoding(codecManager, codec).decodeFromWire(0, body);
+      if (replyId != null) {
+        Message<Object> message = (Message<Object>) replyContexts.remove(replyId);
+        if (msg instanceof ReplyException) {
+          ReplyException e = (ReplyException) msg;
+          message.fail(e.failureCode(), e.getMessage());
+        } else if (replyTo == null) {
+          message.reply(msg, options);
+        } else {
+          message.replyAndRequest(msg, options, handleReplyFromThisCluster(serverWebSocket, address, replyTo));
+        }
+      } else if (send == Boolean.TRUE) {
+        if (replyTo == null) {
+          vertx.eventBus().send(address, msg, options);
+        } else {
+          vertx.eventBus().request(address, msg, options, handleReplyFromThisCluster(serverWebSocket, address, replyTo));
+        }
+      } else {
         vertx.eventBus().publish(address, msg, options);
       }
     });
+  }
+
+  private MessageCodec forDecoding(CodecManager codecManager, String codec) {
+    // FIXME handle all codecs correctly
+    return Arrays.stream(codecManager.systemCodecs()).filter(mc -> mc.name().equals(codec)).findFirst().get();
+  }
+
+  private Handler<AsyncResult<Message<Object>>> handleReplyFromThisCluster(ServerWebSocket serverWebSocket, String address, String replyId) {
+    return ar -> {
+      JsonObject jsonObject = new JsonObject();
+      jsonObject.put("address", address).put("replyId", replyId);
+      MessageCodec messageCodec;
+      Object body;
+      if (ar.succeeded()) {
+        MessageImpl<Object, Object> message = (MessageImpl<Object, Object>) ar.result();
+        if (message.replyAddress() != null) {
+          String replyTo = storeReplyContext(message, 30 * 1000, null);
+          jsonObject.put("replyTo", replyTo);
+        }
+        body = message.body();
+        messageCodec = forEncoding(null, body);
+      } else {
+        body = ar.cause();
+        messageCodec = CodecManager.REPLY_EXCEPTION_MESSAGE_CODEC;
+      }
+      Buffer buffer = Buffer.buffer();
+      jsonObject.put("codec", messageCodec.name());
+      messageCodec.encodeToWire(buffer, body);
+      jsonObject.put("body", buffer);
+      writeBinaryMessage(serverWebSocket, jsonObject);
+    };
+  }
+
+  private MessageCodec forEncoding(String codec, Object body) {
+    // FIXME handle all codecs correctly
+    return codecManager.lookupCodec(body, codec);
+  }
+
+  private <T> String storeReplyContext(Object ctx, long timeout, Promise<Message<T>> promise) {
+    String id = UUID.randomUUID().toString();
+    replyContexts.put(id, ctx);
+    vertx.setTimer(timeout, l -> {
+      Object o = replyContexts.remove(id);
+      if (o != null && promise != null) {
+        promise.tryFail(new ReplyException(ReplyFailure.TIMEOUT));
+      }
+    });
+    return id;
   }
 
   @Override
@@ -77,28 +126,33 @@ public class EventBusLink implements EventBus {
   @Override
   public EventBus send(String address, Object message, DeliveryOptions options) {
     if (addresses.contains(address)) {
-      JsonObject json = createPayload(address, message, options, "send");
-      send(json);
+      JsonObject json = new JsonObject()
+          .put("address", address)
+          .put("send", Boolean.TRUE)
+          .put("options", options.toJson());
+      MessageCodec messageCodec = forEncoding(options.getCodecName(), message);
+      json.put("codec", messageCodec.name());
+      Buffer buffer = Buffer.buffer();
+      messageCodec.encodeToWire(buffer, message);
+      json.put("body", buffer);
+      connect(ar -> {
+        if (ar.succeeded()) {
+          writeBinaryMessage(ar.result(), json);
+        }
+      });
     } else {
       delegate.send(address, message, options);
     }
     return this;
   }
 
-  private void with(Handler<AsyncResult<WebSocket>> handler) {
+  private void connect(Handler<AsyncResult<WebSocket>> handler) {
     if (webSocket == null) {
       httpClient.webSocket("/", ar -> {
         if (ar.succeeded()) {
           if (webSocket == null) {
             webSocket = ar.result();
-            webSocket.closeHandler(v -> webSocket = null).binaryMessageHandler(buffer -> {
-              JsonObject json = buffer.toJsonObject();
-              String replyId = json.getString("replyId");
-              Handler<JsonObject> h = replyHandlers.remove(replyId);
-              if (h != null) {
-                h.handle(json);
-              }
-            });
+            webSocket.closeHandler(v -> webSocket = null).binaryMessageHandler(this::handleReplyFromOtherCluster);
           } else {
             ar.result().close();
           }
@@ -112,47 +166,13 @@ public class EventBusLink implements EventBus {
     }
   }
 
-  private JsonObject createPayload(String address, Object message, DeliveryOptions options, String method) {
-    return createPayload(address, message, options, method, null);
-  }
-
-  private JsonObject createPayload(String address, Object message, DeliveryOptions options, String method, String replyId) {
-    MessageCodec codec = codecManager.lookupCodec(message, options.getCodecName());
-    Buffer buffer = Buffer.buffer();
-    codec.encodeToWire(buffer, message);
-    JsonObject json = new JsonObject()
-        .put("method", method)
-        .put("address", address)
-        .put("options", options.toJson())
-        .put("codec", codec.name())
-        .put("body", buffer.getBytes());
-    if (replyId != null) {
-      json.put("replyTo", replyId);
+  private void handleReplyFromOtherCluster(Buffer buffer) {
+    JsonObject json = buffer.toJsonObject();
+    String replyId = json.getString("replyId");
+    Handler<JsonObject> handler = (Handler<JsonObject>) replyContexts.remove(replyId);
+    if (handler != null) {
+      handler.handle(json);
     }
-    return json;
-  }
-
-  private JsonObject createReplyPayload(MessageImpl message, String replyId) {
-    MessageCodec codec = message.codec();
-    Buffer buffer = Buffer.buffer();
-    codec.encodeToWire(buffer, message.body());
-    JsonObject json = new JsonObject()
-        .put("replyId", replyId)
-        .put("codec", codec.name())
-        .put("body", buffer.getBytes());
-    return json;
-  }
-
-  private JsonObject createReplyPayload(ReplyException e, String replyId) {
-    MessageCodec codec = CodecManager.REPLY_EXCEPTION_MESSAGE_CODEC;
-    Buffer buffer = Buffer.buffer();
-    codec.encodeToWire(buffer, e);
-    JsonObject json = new JsonObject()
-        .put("replyId", replyId)
-        .put("failure", true)
-        .put("codec", codec.name())
-        .put("body", buffer.getBytes());
-    return json;
   }
 
   @Override
@@ -165,45 +185,42 @@ public class EventBusLink implements EventBus {
     if (addresses.contains(address)) {
       ContextInternal context = (ContextInternal) vertx.getOrCreateContext();
       Promise<Message<T>> promise = context.promise();
-      String replyId = UUID.randomUUID().toString();
-      replyHandlers.put(replyId, json -> {
-        String codec = json.getString("codec");
-        Buffer body = Buffer.buffer(json.getBinary("body"));
-        if (json.getBoolean("failure") == Boolean.TRUE) {
-          ReplyException e = CodecManager.REPLY_EXCEPTION_MESSAGE_CODEC.decodeFromWire(0, body);
-          promise.fail(e);
+      Handler<JsonObject> handler = json -> {
+        String replyTo = json.getString("replyTo");
+        MessageCodec messageCodec = forDecoding(codecManager, json.getString("codec"));
+        Object body = messageCodec.decodeFromWire(0, json.getBuffer("body"));
+        if (body instanceof ReplyException) {
+          ReplyException e = (ReplyException) body;
+          promise.tryFail(e);
         } else {
-          MessageCodec messageCodec = Arrays.stream(new CodecManager().systemCodecs()).filter(mc -> mc.name().equals(codec)).findFirst().get();
-          Object msg = messageCodec.decodeFromWire(0, body);
-          promise.complete(new EventBusLinkMessage<>(address, msg));
+          promise.tryComplete(new EventBusLinkMessage<>(this, replyTo, address, body));
+        }
+      };
+      String replyTo = storeReplyContext(handler, options.getSendTimeout(), promise);
+      JsonObject json = new JsonObject()
+          .put("address", address)
+          .put("send", Boolean.TRUE)
+          .put("replyTo", replyTo)
+          .put("options", options.toJson());
+      MessageCodec messageCodec = forEncoding(options.getCodecName(), message);
+      json.put("codec", messageCodec.name());
+      Buffer buffer = Buffer.buffer();
+      messageCodec.encodeToWire(buffer, message);
+      json.put("body", buffer);
+      connect(ar -> {
+        if (ar.succeeded()) {
+          writeBinaryMessage(ar.result(), json);
         }
       });
-      JsonObject json = createPayload(address, message, options, "request", replyId);
-      send(json);
-      vertx.setTimer(options.getSendTimeout(), l -> replyHandlers.remove(replyId));
       return promise.future();
     }
     return delegate.request(address, message, options);
   }
 
-  private void send(ServerWebSocket serverWebSocket, JsonObject json) {
-    serverWebSocket.writeBinaryMessage(json.toBuffer(), war -> {
+  private void writeBinaryMessage(WebSocketBase ws, JsonObject json) {
+    ws.writeBinaryMessage(json.toBuffer(), war -> {
       if (war.failed()) {
         war.cause().printStackTrace();
-      }
-    });
-  }
-
-  private void send(JsonObject json) {
-    with(ws -> {
-      if (ws.succeeded()) {
-        ws.result().writeBinaryMessage(json.toBuffer(), war -> {
-          if (war.failed()) {
-            war.cause().printStackTrace();
-          }
-        });
-      } else {
-        ws.cause().printStackTrace();
       }
     });
   }
@@ -215,8 +232,20 @@ public class EventBusLink implements EventBus {
 
   @Override
   public EventBus publish(String address, Object message, DeliveryOptions options) {
-    JsonObject json = createPayload(address, message, options, "publish");
-    send(json);
+    JsonObject json = new JsonObject()
+        .put("address", address)
+        .put("send", Boolean.FALSE)
+        .put("options", options.toJson());
+    MessageCodec messageCodec = forEncoding(options.getCodecName(), message);
+    json.put("codec", messageCodec.name());
+    Buffer buffer = Buffer.buffer();
+    messageCodec.encodeToWire(buffer, message);
+    json.put("body", buffer);
+    connect(ar -> {
+      if (ar.succeeded()) {
+        writeBinaryMessage(ar.result(), json);
+      }
+    });
     delegate.publish(address, message, options);
     return this;
   }
@@ -319,4 +348,53 @@ public class EventBusLink implements EventBus {
   public boolean isMetricsEnabled() {
     return delegate.isMetricsEnabled();
   }
+
+  void reply(String address, String replyId, Object message, DeliveryOptions options) {
+    JsonObject json = new JsonObject().put("address", address);
+    if (options != null) {
+      json.put("options", options.toJson());
+    }
+    MessageCodec messageCodec = forEncoding(options.getCodecName(), message);
+    json.put("codec", messageCodec.name());
+    Buffer buffer = Buffer.buffer();
+    messageCodec.encodeToWire(buffer, message);
+    json.put("body", buffer);
+    json.put("replyId", replyId);
+    if (webSocket != null) {
+      writeBinaryMessage(webSocket, json);
+    }
+  }
+
+  <R> Future<Message<R>> requestAndReply(String address, String replyId, Object message, DeliveryOptions options) {
+    ContextInternal context = (ContextInternal) vertx.getOrCreateContext();
+    Promise<Message<R>> promise = context.promise();
+    Handler<JsonObject> handler = json -> {
+      String replyTo = json.getString("replyTo");
+      MessageCodec messageCodec = forDecoding(codecManager, json.getString("codec"));
+      Object body = messageCodec.decodeFromWire(0, json.getBuffer("body"));
+      if (body instanceof ReplyException) {
+        ReplyException e = (ReplyException) body;
+        promise.tryFail(e);
+      } else {
+        promise.tryComplete(new EventBusLinkMessage<>(this, replyTo, address, body));
+      }
+    };
+    String replyTo = storeReplyContext(handler, options.getSendTimeout(), promise);
+    JsonObject json = new JsonObject()
+        .put("address", address)
+        .put("send", Boolean.TRUE)
+        .put("replyId", replyId)
+        .put("replyTo", replyTo)
+        .put("options", options.toJson());
+    MessageCodec messageCodec = forEncoding(options.getCodecName(), message);
+    json.put("codec", messageCodec.name());
+    Buffer buffer = Buffer.buffer();
+    messageCodec.encodeToWire(buffer, message);
+    json.put("body", buffer);
+    if (webSocket != null) {
+      writeBinaryMessage(webSocket, json);
+    }
+    return promise.future();
+  }
+
 }
